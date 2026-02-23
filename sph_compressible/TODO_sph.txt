@@ -1,0 +1,114 @@
+Based on files directly in chrono_fsi/sph/ here defined some files with similar name and contempt.
+
+- MU PARAMETER TO BE KEPT? IN OUR MODEL NO VISCOSITY EVER CONSIDERED - FOR NOW REMOVE IT EVERYWHERE.
+- REFERENCES TO STRESSES AND ALSO TO MESHES REMOVED EVERYWHERE. MESHES RELATED COUNTERS LEFT IN COUNTERS STRUCT.
+- ADDED VECTOR OF DERIVATIVE FOR H AND SYMMETRIC KERNELS IN FORCE COMPUTATIONS. NEED TO DO THAT ALSO FOR BCE MARKERS?
+
+ISSUE OF BOUNDARY CONDITIONS. NO CLEAR METHOD ON HOW TO TREAT THEM. IN SOME PAPERS USE OF "GHOST PARTICLES" WHICH EVOLVE THEIR THERMODYNAMIC PROPERTIES
+LIKE ALL SPH FLUID PARTICLES BUT THIER POSITIONS AND VELOCITY ARE SET ACCORDING TO THE RIGID BODY THEY BELONG TO. HOWEVER IN CURRENT IMPLEMENTATION, WHEN COMPUTING 
+DENSITY AND THE RIGHT HAND SIDE OF THE GOVERNING EQUATIONS OF MOTION, ONLY PROPER FLUID PARTICLES ARE INCLUDED IN THE SUMMATIONS. SO NEED TO REVISIT THIS IMPLEMENTATION.
+
+ACTUAL FORCE/DENSITY COMPUTATIONS: 
+  - Density sum performed on all marker types EXCEPT for WALL bce. Contributions to density summation ONLY from PURE FLUID markers.
+  - RHS of EOM computed for ALL markers types EXCEPT for WALL bce (all derivatives set to zero by default). Avoided individual SOLID-SOLID contributions.
+    So a RIGID bce will see its properties evolved in time, due only due to neighboring fluid markers. 
+    a Fluid marker will see its properties evolved in time also with RIGID/WALL contributions.
+
+
+- PERMEABLE BOUNDARY CONDITIONS STILL A ISSUE, CHRONO AFAIK NOT READY TO DEAL WITH GHOST BUFFER DOMAIN.
+- SOLID BOUNDARY CONDITIONS FOR NOW IMPLEMENTED CLASSIC ADAMI BCS WITH HIS SUGGESTIONS FOR FREE SLIP CONDITION.
+  MEANS EXTRAPOLATE P, U, H AND RHO FROM EOS. FOR VELOCITY USE PRESCRIBED ONE ONLY. THEN AVOID VISCOUS INTERACTION 
+  BETWEEN FLUID PARTICLES AND SURROINDING DUMMY ONES. THIS IMPLICITELY ENFORCE NOPENETRATION.
+  IMPLEMENTED WITH AN IF STATEMENT IN COMPUTATIONS OF RHS OF DERIVATIVES.
+
+
+WHERE TO UPDATE PRESSURE, TEMPERATURE AND SPEED OF SOUND? AT WHICH POINT? NOT DONE IN FSIFORCE_COMPRESSIBLE 
+BE CAREFUL IN MULTI_STEP INTEGRATOR TO CONSISTENTLY UPDATE PRESSURE AND TEMPERATURE TO PROPERLY COMPUTE THE MOMENTUM EQUATION.
+
+WHEN DENSITY IS COMPUTED BY SUMMATION, THE VALUES OF PRESSURE AND SPEED OF SOUND ARE UPDATED IN THE SAME KERNEL, WITHOUT WAITING EXTERNAL INTERVENTION.
+
+IN THE DENSITY EULER STEP PRESSURE IS IMMEDIATELY UPDATED AFTER DENSITY INTEGRATION. MAKES SENSE SINCE OTHER RHS OF DERIVATIVES ARE ALREADY COMPUTED.
+CAN MOVE THIS PRESSURE UPDATE AFTER ALL VARIABLES HAVE BEEN INTEGRATED SINCE IT ALSO DEPENDS ON ENERGY IN THE COMPRESSIBLE FRAMEWORK
+
+- STUDY THE UPDATE OF THE ACTIVITYIDENTIFIER VECTORS. THESE ARE ACTUALLY COMPUTED IN FLUID DYNAMICS KERNELS. IT POPULATES THEM WITH 1 IF FLUID PARTICLE 
+  IS NEAR ENOUGH TO A SOLID BODY FOR FSI INTERACTION, WITH 0 IF OUTSIDE THIS INTERACTION ZONE BUT STILL IN FLUID DYNAMICAL COMPUTATION, WITH -1 IF OUTSIDE
+  ALSO THE ZOMBIE DOMAIN SO THEY ARE NOT EVOLVED AT ALL. 
+  THEN THE PREFIX SUM IS CARRIED ON BY CONSIDERING -1 FLAGS AS ZERO VALUES.
+  THE COLLISION SYSTEM CLASS ON ITS OWN USES THESE LISTS TO COMPUTE THE NEIGHBOR LISTS. CHECK AGAIN HOW 0 FLAGS ARE TREATED AND HOW FLUID DYNAMICS AND RIGID BODY INTERACTION
+  WORKS DEPENDING ON THESE FLAGS. 
+
+
+IN COMPUTATION OF FSIFORCE RHS WE HAVE THAT VELOCITY AND ENERGY EQUATIONS HAVE DENSITY AT DENOMINATOR. IF LOCAL DENSITY IS TOO LOW IT MAY GIVE RISE TO NUMERICAL ERRORS.
+CONSIDER USING A PROTECTION LIKE MAX(RHO; RHO_MIN)
+
+
+ALSO NEED TO MODIFY THE NEIGHBOR SEARCH SCHEME: WITH VARIABLE H THE SYMMETRY WOULD BE BROKEN IF USING A CONSTANT CELLSIZE AND GRIDSIZE.
+IMPLEMENT SEARCH FOR H_MAX OF ALL PARTICLES AND DEFINITION OF CELL SIZE = 2*H_MAX.
+THEN NEIGHBOR SEARCH ALGORITHM CAN BE LEFT AS IT IS.
+JUST MODIFY THE SUPPORT RADIUS SAFETY CHECK TO BE: 2*H_AVERAGE >= DISTANCE.
+DEFINITION AND CALCULATION OF GRIDSIZE AND CELLSIZE OCCURS IN CHFSIFLUIDSYSTEMSPH FILE.
+
+
+CHECK CONSISTENCY BETWEEN CALCULATION OF FORCE ON SOLID BODIES: FORCE = MASS*FLUID FORCE OR FORCE = DENSITY * FLUID FORCE OR ELSE??
+
+So far defined:
+- ChFsiDefinitionsSPH_compressible.h : redefined PhysicsProblem to account for compressible Euler equations only.
+                                       Redefined EosType and ViscosityMethod for ideal gas law and artificial viscosity types
+                                       Need to redefine other parameters?
+- ChFsiParamsSPH_compressible.h    : used to redefine the class ChFsiParamsSPHCompressible. Some of original ChFsiParamsSPH can be reused, some others useless.
+                                     For now useless only commented out. REVIEW some parameters, can they be of some use?  
+                                     All parameters concerning CRM have been removed.
+
+FILES DEFINED IN chrono_fsi/sph/physics that have been modified for compressibility:
+- FsiDataManager :  created a new struct to hold arrays of sph particles properties. Removed strain-related arrays. Added a vector of Real3 representing the particle's T,u,speed 
+                    of sound. Need to add also Entropy? Renamed vector VelMas to Vel only because in first implementation will not use velocity/density as main variable but only
+                    velocity. FsiBodyState structs are fine enough. Mesh-related structs not needed. Proximity data struct fine. Counters struct fine.
+                    MODIFIED the structs that hold sph marker properties. REALLY NEED T AND CS VECTORS? OR CAN REMOVE THEM?
+                   -MODIFIED ADDSPHPARTICLE() method to get as input only Rho,Pre,En. T and Cs follow internally
+                   -ADDBCEMARKER() TO BE MODIFIED? Markers now added with pre-defined P,RHO,EN,T,Cs. NEED version that passes them explicitely??
+                   -Added vector DerivEnD for derivative of thermal energy.
+                   -BCE ACC NEEDED ALSO IN EXPLICIT SCHEMES???? FOR NOW LEFT THERE
+                   -added getTempSound and getkernelrad.
+                   -redefined also data structs for fsi bodies and counters because they are not exported from original source file, reference to them would induce linking        
+                    errors.
+                   -deriv vectors now of Real5 to store together derivatives of vel, rho, en.
+                   -added deriv vector for h.
+- SphGeneral  :  created a new device function to implement the ideal gas laws in different forms: PV, RHO T, RHO EN, depending on the desired expression and variables.
+                 Need to keep the static global parameters paramsD and countersD?
+                 Need to define also an INVERSE EOS??
+- CollisionSystem : Only changes were to the data types involved. Corrected pointers to data types belonging to original chrono::fsi::sph in order to point to 
+                    chrono::fsi::sph::compressible data types.
+                    CHANGED H PARAMETER IN KERNEL COMPUTATINS FROM ONE IN PARAMS TO H OF SINGLE PARTICLES.
+                    NOTICE THAT WHEN CHECKING IF PARTICLES ARE NEIGHBORS, THE SUPPORT RADIUS IS ALWAYS TAKEN AS 2*KERN_RAD. DOES NOT CHANGE DEPENDING ON THE ACTUAL KERNEL     
+                    FUNCTION CHOSEN!!!!   TO BE CHANGED???
+                    It rearranges data by hash only for actual properties, not for derivatives. This is because derivatives are constructed in hash order directly in FsiForce.  
+                   
+- FsiParticleRelocator_compressible : only changes again are to use the proper data structs for compressible sph marker. 
+- BceManager_compressible : removed all mesh-related functions and methods. Renamed paramsD and countersD to _csph equivalent.
+                            Did not modify logic: marker pos, vel, acc due to rigid body motion is fine. Forces on bodies due to fluid dynamics are simply computed 
+                            as sum of fluid torques/forces acting on all bce marker of such body; the fluid forces here are just computed as Dv/Dt (due to fluid dynamics rules)
+                            times the marker mass. NO NEED TO MODIFY THIS LOGIC HERE - MAYBE MODIFY THE LOGIC IN HOW FLUID PROPERTIES ARE UPDATED FOR BCE MARKERS.
+- FsiForce_base : just rename of the base class FsiForce that acts as interface. Only added the methods to copy vectors of real2 type (for tempSoundD) and change base 
+                  reference types.
+- FsiForce_compressible: define the derived class FsiForce_csph which implements the actual inter particle force computation. 
+                         REMOVED GRADIENT AND LAPLACIAN CORRECTION OPTION as well as CRM DYNAMICS COMPUTATION.
+                         calcRhoKernel() function for density reinitialization kept.
+                         REMOVED THE CHECK ON RELATIVE PRESSURE VARIATION WITH RESPECT TO BASE PRESSURE.
+                         CHANGED CfdAdamiBC() kernel to use compressible variables names, NO MODIFICATION OF LOGIC YET.
+                         REMOVED CFD HOLMES BCE
+                         SAME FOR Cfd RHS: For now modified only names and types of variables. LATER NEED TO CHANGE THE WORKING LOGIC. Removed option for DELTA_SPH in DrhoDt.
+                         FOR SHIFTING METHODS which are templated, changed all variable names/types and REMOVED SHIFTING DIFFERENT FROM XSPH.
+                         Introduced new type Real5 to compute all the derivatives in the same kernel. Add option to compute density as either summation or derivative.
+                         Introduced option to modify the kernel radius h, with the algebraic ADKE scheme, or with a differential equation linked with mass conservation.
+- FluidDynamics_compressible: delete the density_reinitialization method because already in FsiForce.
+                              NOTICE IN THE DOSTEPDYNAMICS THE VERLET INTEGRATION SCHEME IS MISSING IMPLEMENTATION.
+                              in UPDATEACTIVITY kernel chekc the condition with the SETTLING TIME. IS IT NEEDED FOR FLUID ONLY PROBLEMS?
+FILES DEFINED IN chrono_fsi/sph/utils that have been modified for compressibility:
+- UtilsDevice : created a _compressible file to copy the ComputeGridSize() method. Otherwise linking errors because the original function is not marked as exported in the DLL
+                so references to it would not be caught correctly.
+                Define directive for mR5 and mR5CAST
+FILES DEFINED IN chrono_fsi/sph/math that have been modified for compressibility:
+- CustomMath  : created the Real5 struct and associated operators, similar to other types Real2, Real3, Real4. Also defined functions to reduce the dimensionality.
+                E.g. create a Real3 from a Real 5. Needed for the derivatives: vel, rho, en derivatives can be computed in a single kernel.
+
+
